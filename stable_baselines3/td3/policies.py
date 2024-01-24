@@ -333,8 +333,10 @@ class WolpertingerPolicy(TD3Policy):
         proto_action = actor(observation) # (batch_size, action_space)
 
         if actor_noise is not None:
+            # Not sure if this should be done
             proto_action = proto_action + actor_noise
         if actor_clamp:
+            # Not sure if this should be done
             proto_action = proto_action.clamp(-1, 1)
 
         assert len(proto_action.shape) == 2, f"Proto action shape was expected to contain 2 elements, but got {len(proto_action.shape)}"
@@ -381,7 +383,8 @@ class WolpertingerPolicy(TD3Policy):
         for idx, _argmax_idx in enumerate(argmax_idx):
             _argmax_idx = _argmax_idx[0]
 
-            assert _argmax_idx < self.k
+            if isinstance(self.k, int):
+                assert _argmax_idx < self.k
 
             result.append(knn[idx][_argmax_idx])
 

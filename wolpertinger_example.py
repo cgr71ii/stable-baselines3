@@ -9,7 +9,7 @@ env = gym.make("Pendulum-v1", render_mode="rgb_array")
 
 n_actions = env.action_space.shape[-1]
 faiss_index = faiss.IndexFlatL2(n_actions)
-k = 1
+k = 0.5
 #discretized_action_space = np.arange(-2., 2., 0.1).astype(np.float32) # Discretized environment
 discretized_action_space = np.arange(-2., 2., 0.5).astype(np.float32) # Discretized environment
 #discretized_action_space = np.arange(-2., 2., 1.).astype(np.float32) # Discretized environment
@@ -22,7 +22,7 @@ def retrieve_embeddings(embedding, _k):
     assert embedding.shape[1] == n_actions
 
     if isinstance(_k, float):
-        _k = int(discretized_action_space.shape[0] * _k + 0.5)
+        _k = max(1, int(discretized_action_space.shape[0] * _k + 0.5))
 
     result = []
     D, I = faiss_index.search(embedding, _k)
