@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Type, Union
 import torch as th
 from gymnasium import spaces
 from torch import nn
+import numpy as np
 
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.preprocessing import get_action_dim
@@ -267,7 +268,7 @@ class WolpertingerPolicy(TD3Policy):
         n_critics = self.critic_kwargs["n_critics"]
 
         assert callback_retrieve_knn is not None, "callback_retrieve_knn kwarg is mandatory"
-        assert n_critics == 1, f"Expected n_critics was 1, but got {n_critics} (only DDPG is supported)"
+        #assert n_critics == 1, f"Expected n_critics was 1, but got {n_critics} (only DDPG is supported)"
 
         self.actor_input_size, self.actor_output_size = self.actor.features_dim, self.actor.action_dim
         self.critic_input_size, self.critic_output_size = self.critic_kwargs["net_arch"][0], self.critic_kwargs["net_arch"][-1]
@@ -278,46 +279,6 @@ class WolpertingerPolicy(TD3Policy):
 
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self._predict_conf(observation=observation, deterministic=deterministic, actor=self.actor, critic=self.critic)
-
-    def _predict_conf(self, observation: PyTorchObs, deterministic: bool = False, actor: Actor = None, critic: ContinuousCritic = None, actor_noise: th.Tensor = None, actor_clamp: bool = False) -> th.Tensor:
-        if actor is None:
-            actor = self.actor
-        if critic is None:
-            critic = self.critic
-
-        assert len(observation.shape) == 2, f"Observation shape was expected to contain 2 elements, but got {len(observation.shape)}"
-        #assert observation.shape[0] == 1, f"Observation shape[0] was expected to be 1, but got {observation.shape[0]}"
-        assert observation.shape[1] == self.actor_input_size, f"Observation shape[1] was expected to be {self.actor_input_size}, but got {observation.shape[1]}"
-
-        proto_action = actor(observation)
-
-        if actor_noise is not None:
-            proto_action = proto_action + actor_noise
-        if actor_clamp:
-            proto_action = proto_action.clamp(-1, 1)
-
-        assert len(proto_action.shape) == 2, f"Proto action shape was expected to contain 2 elements, but got {len(proto_action.shape)}"
-        #assert proto_action.shape[0] == 1, f"Proto action shape[0] was expected to be 1, but got {proto_action.shape[0]}"
-        assert proto_action.shape[1] == self.actor_output_size, f"Proto action shape[1] was expected to be {self.actor_output_size}, but got {proto_action.shape[1]}"
-
-        knn = th.tensor(self.callback_retrieve_knn(proto_action.detach().cpu().numpy(), self.k)[0]).to(self.device)
-
-        assert len(knn.shape) == 2, f"kNN shape was expected to contain 2 elements, but got {len(knn.shape)}"
-        assert knn.shape[0] <= self.k if not self.knn_percentage else True, f"kNN shape[0] was expected to be <={self.k}, but got {knn.shape[0]}"
-        assert knn.shape[1] == self.actor_output_size, f"kNN shape[1] was expected to be {self.actor_output_size}, but got {knn.shape[1]}"
-        #assert knn.shape[1] + observation.shape[0] == self.critic_input_size, f"kNN shape[1] + observation shape was expected to be {self.critic_input_size}, but got {knn.shape[1] + observation.shape[0]}"
-
-        critic_output = critic(observation.tile((knn.shape[0], 1)), knn)
-        critic_output = critic_output[0] # first critic
-
-        assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
-        #assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
-        assert critic_output.shape[0] == knn.shape[0], f"critic shape[0] was expected to be {knn.shape[0]}, but got {critic_output.shape[0]}"
-        assert critic_output.shape[1] == knn.shape[1], f"critic shape[1] was expected to be {knn.shape[1]}, but got {critic_output.shape[1]}"
-
-        argmax_idx = critic_output.argmax(dim=0).detach().cpu().item()
-
-        return knn[argmax_idx] # Discretized action
 
 #    def _predict_conf(self, observation: PyTorchObs, deterministic: bool = False, actor: Actor = None, critic: ContinuousCritic = None, actor_noise: th.Tensor = None, actor_clamp: bool = False) -> th.Tensor:
 #        if actor is None:
@@ -340,63 +301,96 @@ class WolpertingerPolicy(TD3Policy):
 #        #assert proto_action.shape[0] == 1, f"Proto action shape[0] was expected to be 1, but got {proto_action.shape[0]}"
 #        assert proto_action.shape[1] == self.actor_output_size, f"Proto action shape[1] was expected to be {self.actor_output_size}, but got {proto_action.shape[1]}"
 #
-#        knn = th.tensor(self.callback_retrieve_knn(proto_action.detach().cpu().numpy(), self.k)).to(self.device)
+#        knn = th.tensor(self.callback_retrieve_knn(proto_action.detach().cpu().numpy(), self.k)[0]).to(self.device)
 #
-#        assert len(knn.shape) == 3, f"kNN shape was expected to contain 3 elements, but got {len(knn.shape)}"
-#        assert knn.shape[0] == observation.shape[0], f"kNN shape[0] was expected to be {observation.shape[0]}, but got {knn.shape[0]}"
-#        assert knn.shape[1] <= self.k if not self.knn_percentage else True, f"kNN shape[1] was expected to be <={self.k}, but got {knn.shape[1]}"
-#        assert knn.shape[2] == self.actor_output_size, f"kNN shape[2] was expected to be {self.actor_output_size}, but got {knn.shape[2]}"
+#        assert len(knn.shape) == 2, f"kNN shape was expected to contain 2 elements, but got {len(knn.shape)}"
+#        assert knn.shape[0] <= self.k if not self.knn_percentage else True, f"kNN shape[0] was expected to be <={self.k}, but got {knn.shape[0]}"
+#        assert knn.shape[1] == self.actor_output_size, f"kNN shape[1] was expected to be {self.actor_output_size}, but got {knn.shape[1]}"
 #        #assert knn.shape[1] + observation.shape[0] == self.critic_input_size, f"kNN shape[1] + observation shape was expected to be {self.critic_input_size}, but got {knn.shape[1] + observation.shape[0]}"
 #
-#        result = []
-#        partial_result = []
-#        #critic_output = critic(observation.tile((knn.shape[0], 1)), knn)
-#        #critic_output = critic_output[0] # first critic
+#        critic_output = critic(observation.tile((knn.shape[0], 1)), knn)
+#        critic_output = critic_output[0] # first critic
 #
-#        # Process each neighbour (is it better to process batch_size * retrieved neighbours?)
-#        for knn_idx in range(knn.shape[1]):
-#            _knn = knn[:,knn_idx] # Get each neighbour (the knn_idx th) for each observation
-#            #critic_output = critic(observation.tile((knn.shape[0], 1)), knn)
-#            critic_output = critic(observation, _knn)
-#            critic_output = critic_output[0] # first critic (not TD3 but DDPG)
+#        assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
+#        #assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
+#        assert critic_output.shape[0] == knn.shape[0], f"critic shape[0] was expected to be {knn.shape[0]}, but got {critic_output.shape[0]}"
+#        assert critic_output.shape[1] == knn.shape[1], f"critic shape[1] was expected to be {knn.shape[1]}, but got {critic_output.shape[1]}"
 #
-#            assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
-#            assert critic_output.shape[0] == observation.shape[0], f"critic shape[0] was expected to be {observation.shape[0]}, but got {critic_output.shape[0]}"
-#            assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
-#            #assert critic_output.shape[1] == knn.shape[1], f"critic shape[1] was expected to be {knn.shape[1]}, but got {critic_output.shape[1]}"
-#            #assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
-#            #assert critic_output.shape[0] == knn.shape[0], f"critic shape[0] was expected to be {knn.shape[0]}, but got {critic_output.shape[0]}"
-#            #assert critic_output.shape[1] == knn.shape[1], f"critic shape[1] was expected to be {knn.shape[1]}, but got {critic_output.shape[1]}"
+#        argmax_idx = critic_output.argmax(dim=0).detach().cpu().item()
 #
-#            #argmax_idx = critic_output.argmax(dim=0).detach().cpu().item()
-#
-#            partial_result.append(critic_output.detach().cpu().numpy())
-#
-#        partial_result = np.array(partial_result)
-#
-#        assert len(partial_result.shape) == 3
-#        assert partial_result.shape[0] == knn.shape[1] # neighbours
-#        assert partial_result.shape[1] == observation.shape[0] # batch_size
-#        assert partial_result.shape[2] == 1 # Q(s,a)
-#
-#        argmax_idx = np.argmax(partial_result, axis=0)
-#
-#        assert len(argmax_idx.shape) == 2
-#        assert argmax_idx.shape[0] == observation.shape[0] # batch size
-#        assert argmax_idx.shape[1] == 1
-#
-#        for idx, _argmax_idx in enumerate(argmax_idx):
-#            _argmax_idx = _argmax_idx[0]
-#
-#            assert _argmax_idx < self.k
-#
-#            result.append(knn[idx][_argmax_idx])
-#
-#        result = th.tensor(result).to(self.device)
-#
-#        #return knn[argmax_idx] # Discretized action
-#        #return np.array(result)
-#        return result
+#        return knn[argmax_idx] # Discretized action
+
+    def _predict_conf(self, observation: PyTorchObs, deterministic: bool = False, actor: Actor = None, critic: ContinuousCritic = None, actor_noise: th.Tensor = None, actor_clamp: bool = False) -> th.Tensor:
+        if actor is None:
+            actor = self.actor
+        if critic is None:
+            critic = self.critic
+
+        #assert len(observation.shape) == 2, f"Observation shape was expected to contain 2 elements, but got {len(observation.shape)}"
+        assert observation.shape[1] == self.actor_input_size, f"Observation shape[1] was expected to be {self.actor_input_size}, but got {observation.shape[1]}"
+
+        batch_size = observation.shape[0]
+        proto_action = actor(observation) # (batch_size, action_space)
+
+        if actor_noise is not None:
+            proto_action = proto_action + actor_noise
+        if actor_clamp:
+            proto_action = proto_action.clamp(-1, 1)
+
+        assert len(proto_action.shape) == 2, f"Proto action shape was expected to contain 2 elements, but got {len(proto_action.shape)}"
+        assert proto_action.shape[0] == batch_size, f"Proto action shape[0] was expected to be {batch_size}, but got {proto_action.shape[0]}"
+        assert proto_action.shape[1] == self.actor_output_size, f"Proto action shape[1] was expected to be {self.actor_output_size}, but got {proto_action.shape[1]}"
+
+        knn = th.tensor(self.callback_retrieve_knn(proto_action.detach().cpu().numpy(), self.k)).to(self.device) # (batch_size, <=k, action_space)
+
+        assert len(knn.shape) == 3, f"kNN shape was expected to contain 3 elements, but got {len(knn.shape)}"
+        assert knn.shape[0] == batch_size, f"kNN shape[0] was expected to be {batch_size}, but got {knn.shape[0]}"
+        assert knn.shape[1] <= self.k if not self.knn_percentage else True, f"kNN shape[1] was expected to be <={self.k}, but got {knn.shape[1]}"
+        assert knn.shape[2] == self.actor_output_size, f"kNN shape[2] was expected to be {self.actor_output_size}, but got {knn.shape[2]}"
+
+        _k = knn.shape[1]
+        result = []
+        partial_result = []
+
+        # Process each neighbour (is it better to process batch_size * retrieved neighbours?)
+        for knn_idx in range(_k):
+            _knn = knn[:,knn_idx] # Get each neighbour (the knn_idx th) for each observation
+            critic_output = critic(observation, _knn) # Evaluate observations with each knn
+            critic_output = th.cat(critic_output, dim=1)
+            critic_output, _= th.min(critic_output, dim=1, keepdim=True)
+
+            assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
+            assert critic_output.shape[0] == batch_size, f"critic shape[0] was expected to be {batch_size}, but got {critic_output.shape[0]}"
+            assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
+
+            partial_result.append(critic_output.detach().cpu().numpy())
+
+        partial_result = np.array(partial_result) # (<=k, batch_size, 1)
+
+        assert len(partial_result.shape) == 3
+        assert partial_result.shape[0] == _k # neighbours
+        assert partial_result.shape[1] == batch_size
+        assert partial_result.shape[2] == 1 # Q(s,a)
+
+        argmax_idx = np.argmax(partial_result, axis=0)
+
+        assert len(argmax_idx.shape) == 2
+        assert argmax_idx.shape[0] == batch_size
+        assert argmax_idx.shape[1] == 1
+
+        for idx, _argmax_idx in enumerate(argmax_idx):
+            _argmax_idx = _argmax_idx[0]
+
+            assert _argmax_idx < self.k
+
+            result.append(knn[idx][_argmax_idx])
+
+        result = th.tensor(result).to(self.device)
+
+        if len(result.shape) == 1:
+            result = result.unsqueeze(1)
+
+        return result
 
 class CnnPolicy(TD3Policy):
     """

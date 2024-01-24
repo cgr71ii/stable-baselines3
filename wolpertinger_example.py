@@ -10,7 +10,10 @@ env = gym.make("Pendulum-v1", render_mode="rgb_array")
 n_actions = env.action_space.shape[-1]
 faiss_index = faiss.IndexFlatL2(n_actions)
 k = 1
-discretized_action_space = np.array([[-2.], [-1.5], [-1.], [-.5], [0.], [.5], [1.], [1.5], [2.]]).astype(np.float32) # Discretized environment
+#discretized_action_space = np.arange(-2., 2., 0.1).astype(np.float32) # Discretized environment
+discretized_action_space = np.arange(-2., 2., 0.5).astype(np.float32) # Discretized environment
+#discretized_action_space = np.arange(-2., 2., 1.).astype(np.float32) # Discretized environment
+discretized_action_space = discretized_action_space.reshape((discretized_action_space.shape[0], 1))
 
 faiss_index.add(discretized_action_space)
 
@@ -36,7 +39,7 @@ def retrieve_embeddings(embedding, _k):
 # The noise objects for TD3
 action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
 
-#model = TD3("MlpPolicy", env, action_noise=action_noise, verbose=1)
+#model = TD3( # Works, but WolpertingerPolicy was designed with DDPG in mind
 model = DDPG(
     "WolpertingerPolicy",
     env,

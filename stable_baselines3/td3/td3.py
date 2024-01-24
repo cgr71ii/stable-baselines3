@@ -137,6 +137,8 @@ class TD3(OffPolicyAlgorithm):
         if _init_setup_model:
             self._setup_model()
 
+        self.is_wolpertinger_policy = isinstance(self.policy, WolpertingerPolicy) # Training changes a bit
+
     def _setup_model(self) -> None:
         super()._setup_model()
         self._create_aliases()
@@ -153,8 +155,6 @@ class TD3(OffPolicyAlgorithm):
         self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        is_wolpertinger_policy = isinstance(self.policy, WolpertingerPolicy) # Training changes a bit
-
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 
@@ -173,15 +173,11 @@ class TD3(OffPolicyAlgorithm):
                 noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
 
                 # Compute the next Q-values: min over all critics targets
-                #if is_wolpertinger_policy:
-                #    # Just DDPG code
-                #    next_q_values = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True)
-                #    next_q_values = next_q_values.unsqueeze(1)
-                #else:
-                #    next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
-                #    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                #    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True) # Relative to TD3, not DDPG
-                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+                if self.is_wolpertinger_policy:
+                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True)
+                else:
+                    next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
 
