@@ -11,7 +11,7 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.td3.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3Policy
+from stable_baselines3.td3.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3Policy, WolpertingerPolicy
 
 SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
@@ -69,6 +69,7 @@ class TD3(OffPolicyAlgorithm):
         "MlpPolicy": MlpPolicy,
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
+        "WolpertingerPolicy": WolpertingerPolicy,
     }
     policy: TD3Policy
     actor: Actor
@@ -152,6 +153,8 @@ class TD3(OffPolicyAlgorithm):
         self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
+        is_wolpertinger_policy = isinstance(self.policy, WolpertingerPolicy) # Training changes a bit
+
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 
@@ -168,11 +171,20 @@ class TD3(OffPolicyAlgorithm):
                 # Select action according to policy and add clipped noise
                 noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
                 noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
-                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
 
                 # Compute the next Q-values: min over all critics targets
+                #if is_wolpertinger_policy:
+                #    # Just DDPG code
+                #    next_q_values = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True)
+                #    next_q_values = next_q_values.unsqueeze(1)
+                #else:
+                #    next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+                #    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                #    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True) # Relative to TD3, not DDPG
+                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
