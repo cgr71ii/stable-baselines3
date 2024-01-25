@@ -262,7 +262,7 @@ MlpPolicy = TD3Policy
 class WolpertingerPolicy(TD3Policy):
 
     #def __init__(self, *args, callback_retrieve_knn, embedding_size, k=0.1, **kwargs):
-    def __init__(self, *args, callback_retrieve_knn=None, callback_retrieve_knn_training=None, k=0.1, **kwargs):
+    def __init__(self, *args, callback_retrieve_knn=None, callback_retrieve_knn_training=None, k=0.1, add_all_knn_to_batch=False, **kwargs):
         super().__init__(*args, **kwargs)
 
         #n_critics = self.critic_kwargs["n_critics"]
@@ -278,6 +278,15 @@ class WolpertingerPolicy(TD3Policy):
         self.k = k
         self.knn_percentage = isinstance(self.k, float)
 
+        if self.knn_percentage:
+            min_k_percentage = 0.0001 # 0.01%
+
+            assert min_k_percentage <= self.k <= 1.0, f"k={self.k} is not in [{min_k_percentage}, 1.0]"
+        else:
+            assert self.k >= 1, f"k={self.k} cannot be < 1"
+
+        self.add_all_knn_to_batch = add_all_knn_to_batch # if True, actual batch_size will be retrieved_knn * batch_size
+
         if self.callback_retrieve_knn_training is None:
             self.callback_retrieve_knn_training = callback_retrieve_knn
 
@@ -290,7 +299,7 @@ class WolpertingerPolicy(TD3Policy):
         if critic is None:
             critic = self.critic
 
-        #assert len(observation.shape) == 2, f"Observation shape was expected to contain 2 elements, but got {len(observation.shape)}"
+        assert len(observation.shape) == 2, f"Observation shape was expected to contain 2 elements, but got {len(observation.shape)}"
         assert observation.shape[1] == self.actor_input_size, f"Observation shape[1] was expected to be {self.actor_input_size}, but got {observation.shape[1]}"
 
         batch_size = observation.shape[0]
@@ -317,29 +326,47 @@ class WolpertingerPolicy(TD3Policy):
 
         _k = knn.shape[1]
         result = []
-        partial_result = []
 
-        # Process each neighbour (is it better to process batch_size * retrieved neighbours?)
-        for knn_idx in range(_k):
-            _knn = knn[:,knn_idx] # Get each neighbour (the knn_idx th) for each observation
-            critic_output = critic(observation, _knn) # Evaluate observations with each knn
+        if self.add_all_knn_to_batch:
+            # observation: (batch_size, action_space)
+            # knn: (batch_size, <=k, action_space)
+            #_knn = knn.reshape((_k * batch_size, self.actor_output_size))
+            _knn = th.cat(tuple([knn[::,knn_idx] for knn_idx in range(_k)]), dim=0).to(self.device)
+            _observation = th.tile(observation, (_k, 1)).to(self.device)
+            critic_output = critic(_observation, _knn)
             critic_output = th.cat(critic_output, dim=1)
             critic_output, _= th.min(critic_output, dim=1, keepdim=True)
 
-            assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
-            assert critic_output.shape[0] == batch_size, f"critic shape[0] was expected to be {batch_size}, but got {critic_output.shape[0]}"
-            assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
+            assert len(critic_output.shape) == 2
+            assert critic_output.shape[0] == _k * batch_size, critic_output.shape
+            assert critic_output.shape[1] == 1, critic_output.shape # Q(s,a)
 
-            partial_result.append(critic_output.detach().cpu().numpy())
+            critic_output = critic_output.reshape((batch_size, _k, self.actor_output_size))
+            argmax_idx = np.argmax(critic_output.detach().cpu().numpy(), axis=1)
+        else:
+            # Process each neighbour individually
+            partial_result = []
 
-        partial_result = np.array(partial_result) # (<=k, batch_size, 1)
+            for knn_idx in range(_k):
+                _knn = knn[:,knn_idx] # Get each neighbour (the knn_idx th) for each observation
+                critic_output = critic(observation, _knn) # Evaluate observations with each knn
+                critic_output = th.cat(critic_output, dim=1)
+                critic_output, _= th.min(critic_output, dim=1, keepdim=True)
 
-        assert len(partial_result.shape) == 3
-        assert partial_result.shape[0] == _k # neighbours
-        assert partial_result.shape[1] == batch_size
-        assert partial_result.shape[2] == 1 # Q(s,a)
+                assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
+                assert critic_output.shape[0] == batch_size, f"critic shape[0] was expected to be {batch_size}, but got {critic_output.shape[0]}"
+                assert critic_output.shape[1] == 1, f"critic shape[1] was expected to be 1, but got {critic_output.shape[1]}"
 
-        argmax_idx = np.argmax(partial_result, axis=0)
+                partial_result.append(critic_output.detach().cpu().numpy())
+
+            partial_result = np.array(partial_result) # (<=k, batch_size, 1)
+
+            assert len(partial_result.shape) == 3
+            assert partial_result.shape[0] == _k # neighbours
+            assert partial_result.shape[1] == batch_size
+            assert partial_result.shape[2] == 1 # Q(s,a)
+
+            argmax_idx = np.argmax(partial_result, axis=0)
 
         assert len(argmax_idx.shape) == 2
         assert argmax_idx.shape[0] == batch_size

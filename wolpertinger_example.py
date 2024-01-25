@@ -46,9 +46,10 @@ model = DDPG(
     action_noise=action_noise,
     verbose=1,
     policy_kwargs={
-        "callback_retrieve_knn": lambda e, k: retrieve_embeddings(e, k * 2),
+        "callback_retrieve_knn": lambda e, k: retrieve_embeddings(e, (int if isinstance(k, int) else float)(k * 1.5)),
         "callback_retrieve_knn_training": retrieve_embeddings,
         "k": k,
+        "add_all_knn_to_batch": True,
     },
 )
 
@@ -61,7 +62,11 @@ vec_env = model.get_env()
 #model = TD3.load("td3_pendulum")
 
 obs = vec_env.reset()
+
 while True:
     action, _states = model.predict(obs)
     obs, rewards, dones, info = vec_env.step(action)
     vec_env.render("human")
+
+    if dones:
+        obs = vec_env.reset()
