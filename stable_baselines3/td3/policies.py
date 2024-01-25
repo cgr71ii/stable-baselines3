@@ -388,10 +388,16 @@ class WolpertingerPolicy(TD3Policy):
 
             result.append(knn[idx][_argmax_idx])
 
-        result = th.tensor(result).to(self.device)
+        result = th.stack(result, dim=0).to(self.device)
 
-        if len(result.shape) == 1:
-            result = result.unsqueeze(1)
+        assert len(result.shape) == 2
+        assert result.shape[0] == batch_size
+        assert result.shape[1] == knn.shape[2]
+
+        #result = th.tensor(result).to(self.device)
+
+        #if len(result.shape) == 1:
+        #    result = result.unsqueeze(1)
 
         return result
 
