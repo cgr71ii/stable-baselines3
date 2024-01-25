@@ -341,7 +341,7 @@ class WolpertingerPolicy(TD3Policy):
             assert critic_output.shape[0] == _k * batch_size, critic_output.shape
             assert critic_output.shape[1] == 1, critic_output.shape # Q(s,a)
 
-            critic_output = critic_output.reshape((batch_size, _k, self.actor_output_size))
+            critic_output = critic_output.reshape((batch_size, _k, 1))
             argmax_idx = np.argmax(critic_output.detach().cpu().numpy(), axis=1)
         else:
             # Process each neighbour individually
