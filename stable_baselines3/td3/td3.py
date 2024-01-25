@@ -174,7 +174,7 @@ class TD3(OffPolicyAlgorithm):
 
                 # Compute the next Q-values: min over all critics targets
                 if is_wolpertinger_policy:
-                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True)
+                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True, training=True)
                 else:
                     next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
 

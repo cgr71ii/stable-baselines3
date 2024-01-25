@@ -46,7 +46,8 @@ model = DDPG(
     action_noise=action_noise,
     verbose=1,
     policy_kwargs={
-        "callback_retrieve_knn": retrieve_embeddings,
+        "callback_retrieve_knn": lambda e, k: retrieve_embeddings(e, k * 2),
+        "callback_retrieve_knn_training": retrieve_embeddings,
         "k": k,
     },
 )
