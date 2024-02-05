@@ -262,7 +262,8 @@ MlpPolicy = TD3Policy
 class WolpertingerPolicy(TD3Policy):
 
     #def __init__(self, *args, callback_retrieve_knn, embedding_size, k=0.1, **kwargs):
-    def __init__(self, *args, callback_retrieve_knn=None, callback_retrieve_knn_training=None, k=0.1, add_all_knn_to_batch=False, **kwargs):
+    def __init__(self, *args, callback_retrieve_knn=None, callback_retrieve_knn_training=None, k=0.1, add_all_knn_to_batch=False,
+                 apply_rws_inference=False, **kwargs):
         super().__init__(*args, **kwargs)
 
         #n_critics = self.critic_kwargs["n_critics"]
@@ -277,6 +278,7 @@ class WolpertingerPolicy(TD3Policy):
         #self.embedding_size = embedding_size
         self.k = k
         self.knn_percentage = isinstance(self.k, float)
+        self.apply_rws_inference = apply_rws_inference
 
         if self.knn_percentage:
             min_k_percentage = 0.0001 # 0.01%
@@ -289,6 +291,43 @@ class WolpertingerPolicy(TD3Policy):
 
         if self.callback_retrieve_knn_training is None:
             self.callback_retrieve_knn_training = callback_retrieve_knn
+
+    def roulette_wheel_selection(self, population, fitness_scores):
+        assert len(fitness_scores.shape) == 3
+        assert len(population.shape) == 3
+        assert fitness_scores.shape[0] == population.shape[0] # batch_size
+        assert fitness_scores.shape[1] <= self.k if not self.knn_percentage else True # k
+        assert fitness_scores.shape[2] == 1 # Q value
+        assert population.shape[1] <= self.k if not self.knn_percentage else True # k
+        assert population.shape[2] == self.actor_output_size # action_space
+
+        batch_size = fitness_scores.shape[0]
+        result = []
+
+        #total_fitness = sum(fitness_scores)
+        total_fitness = np.sum(fitness_scores, axis=1) # (batch_size, 1)
+        relative_fitness = np.array([f / t for f, t in zip(fitness_scores, total_fitness)]) # (batch_size, k, 1)
+        cumulative_probability = np.array([sum(relative_fitness[i][:j+1]) for i in range(len(relative_fitness)) for j in range(len(relative_fitness[i]))]).reshape(relative_fitness.shape)
+
+        for batch in range(batch_size):
+            result.append([])
+
+            rand = np.random.random()
+
+            for i, cp in enumerate(cumulative_probability[batch]):
+                cp = cp[0]
+
+                if rand <= cp:
+                    result[-1].append(population[batch][i])
+                    break
+
+        result = np.squeeze(np.array(result), axis=1)
+
+        assert len(result.shape) == 2
+        assert result.shape[0] == batch_size
+        assert result.shape[1] == self.actor_output_size
+
+        return result
 
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self._predict_conf(observation=observation, deterministic=deterministic, actor=self.actor, critic=self.critic, training=False)
@@ -306,10 +345,10 @@ class WolpertingerPolicy(TD3Policy):
         proto_action = actor(observation) # (batch_size, action_space)
 
         if actor_noise is not None:
-            # Not sure if this should be done
+            # TD3-related
             proto_action = proto_action + actor_noise
         if actor_clamp:
-            # Not sure if this should be done
+            # TD3-related
             proto_action = proto_action.clamp(-1, 1)
 
         assert len(proto_action.shape) == 2, f"Proto action shape was expected to contain 2 elements, but got {len(proto_action.shape)}"
@@ -317,7 +356,10 @@ class WolpertingerPolicy(TD3Policy):
         assert proto_action.shape[1] == self.actor_output_size, f"Proto action shape[1] was expected to be {self.actor_output_size}, but got {proto_action.shape[1]}"
 
         knn_callback = self.callback_retrieve_knn_training if training else self.callback_retrieve_knn
-        knn = th.tensor(knn_callback(proto_action.detach().cpu().numpy(), self.k)).to(self.device) # (batch_size, <=k, action_space)
+        knn = knn_callback(proto_action.detach().cpu().numpy(), self.k) # (batch_size, <=k, action_space)
+
+        if not isinstance(knn, th.Tensor):
+            knn = th.tensor(knn).to(self.device)
 
         assert len(knn.shape) == 3, f"kNN shape was expected to contain 3 elements, but got {len(knn.shape)}"
         assert knn.shape[0] == batch_size, f"kNN shape[0] was expected to be {batch_size}, but got {knn.shape[0]}"
@@ -342,7 +384,6 @@ class WolpertingerPolicy(TD3Policy):
             assert critic_output.shape[1] == 1, critic_output.shape # Q(s,a)
 
             critic_output = critic_output.reshape((batch_size, _k, 1))
-            argmax_idx = np.argmax(critic_output.detach().cpu().numpy(), axis=1)
         else:
             # Process each neighbour individually
             partial_result = []
@@ -359,37 +400,38 @@ class WolpertingerPolicy(TD3Policy):
 
                 partial_result.append(critic_output.detach().cpu().numpy())
 
-            partial_result = np.array(partial_result) # (<=k, batch_size, 1)
+            partial_result = th.tensor(partial_result) # (<=k, batch_size, 1)
 
             assert len(partial_result.shape) == 3
             assert partial_result.shape[0] == _k # neighbours
             assert partial_result.shape[1] == batch_size
             assert partial_result.shape[2] == 1 # Q(s,a)
 
-            argmax_idx = np.argmax(partial_result, axis=0)
+            partial_result = partial_result.reshape((batch_size, _k, 1))
+            critic_output = partial_result
 
-        assert len(argmax_idx.shape) == 2
-        assert argmax_idx.shape[0] == batch_size
-        assert argmax_idx.shape[1] == 1
+        if self.apply_rws_inference:
+            result = self.roulette_wheel_selection(knn, critic_output)
+        else:
+            argmax_idx = np.argmax(critic_output.detach().cpu().numpy(), axis=1)
 
-        for idx, _argmax_idx in enumerate(argmax_idx):
-            _argmax_idx = _argmax_idx[0]
+            assert len(argmax_idx.shape) == 2
+            assert argmax_idx.shape[0] == batch_size
+            assert argmax_idx.shape[1] == 1
 
-            if isinstance(self.k, int):
-                assert _argmax_idx < self.k
+            for idx, _argmax_idx in enumerate(argmax_idx):
+                _argmax_idx = _argmax_idx[0]
 
-            result.append(knn[idx][_argmax_idx])
+                if isinstance(self.k, int):
+                    assert _argmax_idx < self.k
 
-        result = th.stack(result, dim=0).to(self.device)
+                result.append(knn[idx][_argmax_idx])
 
-        assert len(result.shape) == 2
-        assert result.shape[0] == batch_size
-        assert result.shape[1] == knn.shape[2]
+            result = th.stack(result, dim=0).to(self.device)
 
-        #result = th.tensor(result).to(self.device)
-
-        #if len(result.shape) == 1:
-        #    result = result.unsqueeze(1)
+            assert len(result.shape) == 2
+            assert result.shape[0] == batch_size
+            assert result.shape[1] == knn.shape[2]
 
         return result
 
