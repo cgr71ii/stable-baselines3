@@ -293,6 +293,9 @@ class WolpertingerPolicy(TD3Policy):
             self.callback_retrieve_knn_training = callback_retrieve_knn
 
     def roulette_wheel_selection(self, population, fitness_scores):
+        population = population.detach().cpu().numpy()
+        fitness_scores = fitness_scores.detach().cpu().numpy()
+
         assert len(fitness_scores.shape) == 3
         assert len(population.shape) == 3
         assert fitness_scores.shape[0] == population.shape[0] # batch_size
@@ -410,8 +413,9 @@ class WolpertingerPolicy(TD3Policy):
             partial_result = partial_result.reshape((batch_size, _k, 1))
             critic_output = partial_result
 
-        if self.apply_rws_inference:
+        if not deterministic and self.apply_rws_inference:
             result = self.roulette_wheel_selection(knn, critic_output)
+            result = th.tensor(result).to(self.device)
         else:
             argmax_idx = np.argmax(critic_output.detach().cpu().numpy(), axis=1)
 
