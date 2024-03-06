@@ -359,7 +359,7 @@ class WolpertingerPolicy(TD3Policy):
         assert proto_action.shape[1] == self.actor_output_size, f"Proto action shape[1] was expected to be {self.actor_output_size}, but got {proto_action.shape[1]}"
 
         knn_callback = self.callback_retrieve_knn_training if training else self.callback_retrieve_knn
-        knn = knn_callback(proto_action.detach().cpu().numpy(), self.k) # (batch_size, <=k, action_space)
+        knn = knn_callback(proto_action.detach().cpu().numpy(), self.k, observations=observation) # (batch_size, <=k, action_space)
 
         if not isinstance(knn, th.Tensor):
             knn = th.tensor(knn).to(self.device)
