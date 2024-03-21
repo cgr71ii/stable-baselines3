@@ -17,7 +17,7 @@ discretized_action_space = discretized_action_space.reshape((discretized_action_
 
 faiss_index.add(discretized_action_space)
 
-def retrieve_embeddings(embedding, _k):
+def retrieve_embeddings(embedding, _k, observations):
     assert len(embedding.shape) == 2
     assert embedding.shape[1] == n_actions
 
@@ -46,7 +46,7 @@ model = DDPG(
     action_noise=action_noise,
     verbose=1,
     policy_kwargs={
-        "callback_retrieve_knn": lambda e, k: retrieve_embeddings(e, (int if isinstance(k, int) else float)(k * 1.5)),
+        "callback_retrieve_knn": lambda e, k, observations: retrieve_embeddings(e, (int if isinstance(k, int) else float)(k * 1.5), observations),
         "callback_retrieve_knn_training": retrieve_embeddings,
         "k": k,
         "add_all_knn_to_batch": True,
