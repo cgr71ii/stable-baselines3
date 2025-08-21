@@ -15,6 +15,38 @@ from stable_baselines3.td3.policies import Actor, CnnPolicy, MlpPolicy, MultiInp
 
 SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
+# "Deep Reinforcement Learning in Parameterized Action Space" (https://arxiv.org/abs/1511.04143)
+class InvertGrad(th.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, min_val=-1.0, max_val=1.0):
+        min_t = th.as_tensor(min_val, dtype=input.dtype, device=input.device)
+        max_t = th.as_tensor(max_val, dtype=input.dtype, device=input.device)
+
+        clamped = input.clamp(min_t.item(), max_t.item())
+
+        ctx.save_for_backward(clamped)
+        ctx.min_val = float(min_t.item())
+        ctx.max_val = float(max_t.item())
+
+        #return input
+        return clamped.clamp(min_val, max_val)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        clamped, = ctx.saved_tensors
+        min_val, max_val = ctx.min_val, ctx.max_val
+
+        # Calculate the distance to the bounds
+        dist_min = (clamped - min_val) / (max_val - min_val)
+        dist_max = (max_val - clamped) / (max_val - min_val)
+
+        # Choose scale based on sign of gradient (direction of update)
+        #scale = th.min(dist_min, dist_max)
+        positive_mask = grad_output > 0
+        scale = th.where(positive_mask, dist_max, dist_min)
+        grad_input = grad_output * scale
+
+        return grad_input, None, None
 
 class TD3(OffPolicyAlgorithm):
     """
@@ -103,6 +135,9 @@ class TD3(OffPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        max_grad_norm: Optional[float] = None,
+        lambda_penalty: float = 0.0,
+        invert_grad: bool = False,
     ):
         super().__init__(
             policy,
@@ -133,6 +168,9 @@ class TD3(OffPolicyAlgorithm):
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
+        self.max_grad_norm = max_grad_norm
+        self.lambda_penalty = lambda_penalty
+        self.invert_grad = invert_grad
 
         if _init_setup_model:
             self._setup_model()
@@ -174,10 +212,11 @@ class TD3(OffPolicyAlgorithm):
 
                 # Compute the next Q-values: min over all critics targets
                 if is_wolpertinger_policy:
-                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, actor_noise=noise, actor_clamp=True, training=True)
+                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, training=True)
                 else:
-                    next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+                    next_actions = self.actor_target(replay_data.next_observations)
 
+                next_actions = (next_actions + noise).clamp(-1, 1)
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
 
@@ -199,12 +238,23 @@ class TD3(OffPolicyAlgorithm):
             # Delayed policy updates
             if self._n_updates % self.policy_delay == 0:
                 # Compute actor loss
-                actor_loss = -self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations)).mean()
+                actor_actions = self.actor(replay_data.observations)
+
+                if self.invert_grad:
+                    actor_actions = InvertGrad.apply(actor_actions, -1.0, 1.0)
+
+                action_norm_penalty = (actor_actions ** 2).sum(dim=1).mean()
+                actor_loss = -self.critic.q1_forward(replay_data.observations, actor_actions).mean()
+                actor_loss += self.lambda_penalty * action_norm_penalty
                 actor_losses.append(actor_loss.item())
 
                 # Optimize the actor
                 self.actor.optimizer.zero_grad()
                 actor_loss.backward()
+
+                if self.max_grad_norm is not None:
+                    th.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+
                 self.actor.optimizer.step()
 
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)

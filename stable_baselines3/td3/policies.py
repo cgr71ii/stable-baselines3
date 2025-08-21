@@ -42,6 +42,8 @@ class Actor(BasePolicy):
         features_dim: int,
         activation_fn: Type[nn.Module] = nn.ReLU,
         normalize_images: bool = True,
+        actor_layer_norm_input: bool = False,
+        actor_layer_norm_before_activation: bool = False,
     ):
         super().__init__(
             observation_space,
@@ -58,7 +60,8 @@ class Actor(BasePolicy):
         #action_dim = get_action_dim(self.action_space)
         #actor_net = create_mlp(features_dim, action_dim, net_arch, activation_fn, squash_output=True)
         self.action_dim = get_action_dim(self.action_space)
-        actor_net = create_mlp(features_dim, self.action_dim, net_arch, activation_fn, squash_output=True)
+        actor_net = create_mlp(features_dim, self.action_dim, net_arch, activation_fn, squash_output=True,
+                               layer_norm_input=actor_layer_norm_input, layer_norm_before_activation=actor_layer_norm_before_activation)
         # Deterministic action
         self.mu = nn.Sequential(*actor_net)
 
@@ -128,6 +131,10 @@ class TD3Policy(BasePolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        actor_lr_schedule: Optional[Schedule] = None,
+        actor_layer_norm_input: bool = False,
+        actor_layer_norm_before_activation: bool = False,
+        actor_last_layer_init_uniform_value: Optional[float] = None,
     ):
         super().__init__(
             observation_space,
@@ -168,21 +175,38 @@ class TD3Policy(BasePolicy):
             }
         )
 
+        if actor_layer_norm_input:
+            self.actor_kwargs["actor_layer_norm_input"] = actor_layer_norm_input
+        if actor_layer_norm_before_activation:
+            self.actor_kwargs["actor_layer_norm_before_activation"] = actor_layer_norm_before_activation
+
         self.share_features_extractor = share_features_extractor
+        self.actor_last_layer_init_uniform_value = actor_last_layer_init_uniform_value
+        _lr_schedule = lr_schedule if actor_lr_schedule is None else {"actor": actor_lr_schedule, "critic": lr_schedule}
 
-        self._build(lr_schedule)
+        self._build(_lr_schedule)
 
-    def _build(self, lr_schedule: Schedule) -> None:
+    def _build(self, lr_schedule: Union[Schedule, Dict[str, Schedule]]) -> None:
         # Create actor and target
         # the features extractor should not be shared
         self.actor = self.make_actor(features_extractor=None)
         self.actor_target = self.make_actor(features_extractor=None)
+
+        if self.actor_last_layer_init_uniform_value is not None:
+            nn.init.uniform_(self.actor.mu[-2].weight, -self.actor_last_layer_init_uniform_value, self.actor_last_layer_init_uniform_value) # -2 due to squash_output=True
+
         # Initialize the target to have the same weights as the actor
         self.actor_target.load_state_dict(self.actor.state_dict())
 
+        if isinstance(lr_schedule, dict):
+            assert "actor" in lr_schedule and "critic" in lr_schedule, lr_schedule.keys()
+
+        actor_lr_schedule  = lr_schedule["actor"] if isinstance(lr_schedule, dict) else lr_schedule
+        critic_lr_schedule = lr_schedule["critic"] if isinstance(lr_schedule, dict) else lr_schedule
+
         self.actor.optimizer = self.optimizer_class(
             self.actor.parameters(),
-            lr=lr_schedule(1),  # type: ignore[call-arg]
+            lr=actor_lr_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
 
@@ -202,7 +226,7 @@ class TD3Policy(BasePolicy):
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic.optimizer = self.optimizer_class(
             self.critic.parameters(),
-            lr=lr_schedule(1),  # type: ignore[call-arg]
+            lr=critic_lr_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
 
@@ -266,8 +290,6 @@ class WolpertingerPolicy(TD3Policy):
                  apply_rws_inference=False, **kwargs):
         super().__init__(*args, **kwargs)
 
-        #n_critics = self.critic_kwargs["n_critics"]
-
         assert callback_retrieve_knn is not None, "callback_retrieve_knn kwarg is mandatory"
         #assert n_critics == 1, f"Expected n_critics was 1, but got {n_critics} (only DDPG is supported)"
 
@@ -279,6 +301,7 @@ class WolpertingerPolicy(TD3Policy):
         self.k = k
         self.knn_percentage = isinstance(self.k, float)
         self.apply_rws_inference = apply_rws_inference
+        self.n_critics = self.critic.n_critics
 
         if self.knn_percentage:
             min_k_percentage = 0.0001 # 0.01%
@@ -393,8 +416,18 @@ class WolpertingerPolicy(TD3Policy):
 
             for knn_idx in range(_k):
                 _knn = knn[:,knn_idx] # Get each neighbour (the knn_idx th) for each observation
+
+                assert _knn.shape == (batch_size, self.actor_output_size), f"_knn shape was expected to be ({batch_size}, {self.actor_output_size}), but got {_knn.shape}"
+
                 critic_output = critic(observation, _knn) # Evaluate observations with each knn
+
+                assert len(critic_output) == self.n_critics, f"Expected {self.n_critics} critics, but got {len(critic_output)}"
+
                 critic_output = th.cat(critic_output, dim=1)
+                expected_shape = (batch_size, self.n_critics)
+
+                assert critic_output.shape == expected_shape, f"Expected shape was {expected_shape}, but got {critic_output.shape}"
+
                 critic_output, _= th.min(critic_output, dim=1, keepdim=True)
 
                 assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
@@ -403,7 +436,8 @@ class WolpertingerPolicy(TD3Policy):
 
                 partial_result.append(critic_output.detach().cpu().numpy())
 
-            partial_result = th.tensor(partial_result) # (<=k, batch_size, 1)
+            partial_result = np.array(partial_result) # (<=k, batch_size, 1)
+            partial_result = th.from_numpy(partial_result)
 
             assert len(partial_result.shape) == 3
             assert partial_result.shape[0] == _k # neighbours

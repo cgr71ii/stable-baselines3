@@ -113,6 +113,8 @@ def create_mlp(
     activation_fn: Type[nn.Module] = nn.ReLU,
     squash_output: bool = False,
     with_bias: bool = True,
+    layer_norm_input: bool = False,
+    layer_norm_before_activation: bool = False,
 ) -> List[nn.Module]:
     """
     Create a multi layer perceptron (MLP), which is
@@ -130,19 +132,31 @@ def create_mlp(
     :param with_bias: If set to False, the layers will not learn an additive bias
     :return:
     """
+    modules = []
+
+    if layer_norm_input:
+        modules.append(nn.LayerNorm(input_dim, bias=with_bias))
 
     if len(net_arch) > 0:
-        modules = [nn.Linear(input_dim, net_arch[0], bias=with_bias), activation_fn()]
-    else:
-        modules = []
+        modules.append(nn.Linear(input_dim, net_arch[0], bias=with_bias))
+
+        if layer_norm_before_activation:
+            modules.append(nn.LayerNorm(net_arch[0], bias=with_bias))
+
+        modules.append(activation_fn())
 
     for idx in range(len(net_arch) - 1):
         modules.append(nn.Linear(net_arch[idx], net_arch[idx + 1], bias=with_bias))
+
+        if layer_norm_before_activation:
+            modules.append(nn.LayerNorm(net_arch[idx + 1], bias=with_bias))
+
         modules.append(activation_fn())
 
     if output_dim > 0:
         last_layer_dim = net_arch[-1] if len(net_arch) > 0 else input_dim
         modules.append(nn.Linear(last_layer_dim, output_dim, bias=with_bias))
+
     if squash_output:
         modules.append(nn.Tanh())
     return modules
