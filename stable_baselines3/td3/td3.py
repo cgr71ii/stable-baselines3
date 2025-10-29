@@ -4,6 +4,7 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
+import gymnasium as gym
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
@@ -138,6 +139,9 @@ class TD3(OffPolicyAlgorithm):
         max_grad_norm: Optional[float] = None,
         lambda_penalty: float = 0.0,
         invert_grad: bool = False,
+        wolpertinger_target_policy_actor_noise: float = 0.2,
+        wolpertinger_target_actor_noise_clip: float = 0.5,
+        wolpertinger_add_noise_after_knn: bool = True,
     ):
         super().__init__(
             policy,
@@ -171,6 +175,11 @@ class TD3(OffPolicyAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.lambda_penalty = lambda_penalty
         self.invert_grad = invert_grad
+        self.wolpertinger_target_policy_actor_noise = wolpertinger_target_policy_actor_noise
+        self.wolpertinger_target_actor_noise_clip = wolpertinger_target_actor_noise_clip
+        self.wolpertinger_add_noise_after_knn = wolpertinger_add_noise_after_knn
+
+        gym.logger.info("invert_grad: %s", self.invert_grad)
 
         if _init_setup_model:
             self._setup_model()
@@ -197,7 +206,7 @@ class TD3(OffPolicyAlgorithm):
         self.policy.set_training_mode(True)
 
         # Update learning rate according to lr schedule
-        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
+        self._update_learning_rate([(self.actor.optimizer, self.policy.actor_lr_schedule), (self.critic.optimizer, self.policy.critic_lr_schedule)])
 
         actor_losses, critic_losses = [], []
         for _ in range(gradient_steps):
@@ -212,17 +221,29 @@ class TD3(OffPolicyAlgorithm):
 
                 # Compute the next Q-values: min over all critics targets
                 if is_wolpertinger_policy:
-                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=self.critic_target, training=True)
+                    actor_noise = replay_data.actions.clone().data.normal_(0, self.wolpertinger_target_policy_actor_noise)
+                    actor_noise = actor_noise.clamp(-self.wolpertinger_target_actor_noise_clip, self.wolpertinger_target_actor_noise_clip)
+
+                    # pi_theta'
+                    # here both networks are target networks (from the paper: "The parameter theta represents both the parameters of the action generation element in theta_pi and of the critic in theta_Q")
+                    next_actions = self.policy._predict_conf(replay_data.next_observations, actor=self.actor_target, critic=lambda o, a: (self.critic_target.q1_forward(o, a),), actor_noise=actor_noise, actor_clamp=True, training=True)
+
+                    if self.wolpertinger_add_noise_after_knn:
+                        # As long as the discrete actions representations have some meaninful relation among them, adding noise may help improve generalization and robustness
+                        next_actions = (next_actions + noise).clamp(-1, 1)
                 else:
                     next_actions = self.actor_target(replay_data.next_observations)
+                    next_actions = (next_actions + noise).clamp(-1, 1)
 
-                next_actions = (next_actions + noise).clamp(-1, 1)
+                # theta_Q'
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
 
+                # y_i
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
+            # theta_Q
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
@@ -292,3 +313,64 @@ class TD3(OffPolicyAlgorithm):
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
+
+    def _sample_action(
+        self,
+        learning_starts: int,
+        action_noise: Optional[ActionNoise] = None,
+        n_envs: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Code from OffPolicyAlgorithm with modifications for WolpertingerPolicy.
+        """
+        is_wolpertinger_policy = isinstance(self.policy, WolpertingerPolicy)
+
+        # Select action randomly or according to policy
+        if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
+            # Warmup phase
+            unscaled_action = np.array([self.action_space.sample() for _ in range(n_envs)])
+        else:
+            # Note: when using continuous actions,
+            # we assume that the policy uses tanh to scale the action
+            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
+            assert self._last_obs is not None, "self._last_obs was not set"
+
+            if is_wolpertinger_policy and action_noise is not None:
+                unscaled_action, _ = self.predict(self._last_obs, deterministic=False, action_noise=action_noise())
+            else:
+                unscaled_action, _ = self.predict(self._last_obs, deterministic=False)
+
+        # Rescale the action from [low, high] to [-1, 1]
+        if isinstance(self.action_space, spaces.Box):
+            scaled_action = self.policy.scale_action(unscaled_action)
+
+            # Add noise to the action (improve exploration)
+            if action_noise is not None and not is_wolpertinger_policy:
+                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+
+            # We store the scaled action in the buffer
+            buffer_action = scaled_action
+            action = self.policy.unscale_action(scaled_action)
+        else:
+            # Discrete case, no need to normalize or clip
+            buffer_action = unscaled_action
+            action = buffer_action
+        return action, buffer_action
+
+    def predict(
+        self,
+        observation: Union[np.ndarray, Dict[str, np.ndarray]],
+        state: Optional[Tuple[np.ndarray, ...]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        deterministic: bool = False,
+        action_noise: Optional[ActionNoise] = None,
+    ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
+        """
+        Code from BaseAlgorithm with modifications for WolpertingerPolicy.
+        """
+        is_wolpertinger_policy = isinstance(self.policy, WolpertingerPolicy)
+
+        if is_wolpertinger_policy:
+            return self.policy.predict(observation, state, episode_start, deterministic, action_noise=action_noise)
+
+        return self.policy.predict(observation, state, episode_start, deterministic)

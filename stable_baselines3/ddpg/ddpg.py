@@ -75,6 +75,7 @@ class DDPG(TD3):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        **kwargs: Any,
     ):
         super().__init__(
             policy=policy,
@@ -102,6 +103,7 @@ class DDPG(TD3):
             target_noise_clip=0.0,
             target_policy_noise=0.1,
             _init_setup_model=False,
+            **kwargs,
         )
 
         # Use only one critic

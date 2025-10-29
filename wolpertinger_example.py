@@ -1,3 +1,6 @@
+
+import sys
+
 import gymnasium as gym
 import numpy as np
 
@@ -9,11 +12,14 @@ env = gym.make("Pendulum-v1", render_mode="rgb_array")
 
 n_actions = env.action_space.shape[-1]
 faiss_index = faiss.IndexFlatL2(n_actions)
-k = 0.5
+k = 5 # Number of nearest neighbors to retrieve
 #discretized_action_space = np.arange(-2., 2., 0.1).astype(np.float32) # Discretized environment
-discretized_action_space = np.arange(-2., 2., 0.5).astype(np.float32) # Discretized environment
+#discretized_action_space = np.arange(-2., 2., 0.5).astype(np.float32) # Discretized environment
 #discretized_action_space = np.arange(-2., 2., 1.).astype(np.float32) # Discretized environment
+discretized_action_space = np.arange(-2., 2., 0.001).astype(np.float32) # Discretized environment
 discretized_action_space = discretized_action_space.reshape((discretized_action_space.shape[0], 1))
+
+print(f"Discretized action space has shape {discretized_action_space.shape}")
 
 faiss_index.add(discretized_action_space)
 
@@ -38,6 +44,7 @@ def retrieve_embeddings(embedding, _k, observations):
 
 # The noise objects for TD3
 action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
+gamma = 0.99
 
 #model = TD3( # Works, but WolpertingerPolicy was designed with DDPG in mind
 model = DDPG(
@@ -46,14 +53,17 @@ model = DDPG(
     action_noise=action_noise,
     verbose=1,
     policy_kwargs={
-        "callback_retrieve_knn": lambda e, k, observations: retrieve_embeddings(e, (int if isinstance(k, int) else float)(k * 1.5), observations),
+        "callback_retrieve_knn": retrieve_embeddings,
         "callback_retrieve_knn_training": retrieve_embeddings,
         "k": k,
         "add_all_knn_to_batch": True,
     },
+    learning_starts=100,
+    gamma=gamma,
 )
 
-model.learn(total_timesteps=10000, log_interval=10)
+total_timesteps = 10000
+model.learn(total_timesteps=total_timesteps, log_interval=10)
 #model.save("td3_pendulum")
 vec_env = model.get_env()
 
@@ -62,11 +72,46 @@ vec_env = model.get_env()
 #model = TD3.load("td3_pendulum")
 
 obs = vec_env.reset()
+idx = 0
+mean_reward_list = []
+max_episodes = 100
+returns = []
 
-while True:
+print("Evaluation")
+
+sys.stdout.flush()
+sys.stderr.flush()
+
+while idx < max_episodes:
     action, _states = model.predict(obs)
     obs, rewards, dones, info = vec_env.step(action)
-    vec_env.render("human")
+    #vec_env.render("human")
+    #print(f"Eval: {idx}: {rewards}")
+
+    assert isinstance(rewards, np.ndarray), type(rewards)
+    assert len(rewards) == 1
+
+    mean_reward_list.append(rewards[0])
 
     if dones:
         obs = vec_env.reset()
+
+        mean_reward = np.mean(mean_reward_list)
+        return_value = sum([gamma ** i * r for i, r in enumerate(mean_reward_list)])
+
+        print(f"Episode {idx + 1} (steps: {len(mean_reward_list)}): mean_reward={mean_reward:.2f}, return={return_value:.2f}")
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        returns.append(return_value)
+
+        mean_reward_list = []
+        idx += 1
+
+assert len(returns) == max_episodes, len(returns)
+
+mean_returns = np.mean(returns)
+std_returns = np.std(returns)
+
+print(f"Mean returns over {max_episodes} episodes: {mean_returns:.2f} +/- {std_returns:.2f}")

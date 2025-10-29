@@ -1,4 +1,5 @@
 import os
+import sys
 import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
@@ -441,6 +442,9 @@ class EvalCallback(EventCallback):
 
     def _on_step(self) -> bool:
         continue_training = True
+
+        print(f"EvalCallback progress: {self.eval_freq} {self.n_calls} {self.eval_freq}: {self.eval_freq > 0} and {self.n_calls % self.eval_freq} == 0")
+        sys.stdout.flush()
 
         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
             # Sync training and eval env if there is VecNormalize

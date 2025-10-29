@@ -7,6 +7,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, ClassVar, Dict, Iterable, List, Optional, Tuple, Type, TypeVar, Union
+import inspect
 
 import gymnasium as gym
 import numpy as np
@@ -291,13 +292,36 @@ class BaseAlgorithm(ABC):
         :param optimizers:
             An optimizer or a list of optimizers.
         """
-        # Log the current learning rate
-        self.logger.record("train/learning_rate", self.lr_schedule(self._current_progress_remaining))
-
         if not isinstance(optimizers, list):
             optimizers = [optimizers]
-        for optimizer in optimizers:
-            update_learning_rate(optimizer, self.lr_schedule(self._current_progress_remaining))
+
+        for data in optimizers:
+            if isinstance(data, tuple):
+                assert len(data) in (2,4), "If passing a tuple, it must be (optimizer, lr_schedule) or (optimizer, lr_schedule, lr_schedule_args, lr_schedule_kwargs)"
+
+                optimizer, lr_schedule = data[:2]
+                lr_schedule_args = data[2] if len(data) > 2 else []
+                lr_schedule_kwargs = data[3] if len(data) > 3 else {}
+
+                lr_schedule_args.insert(0, self._current_progress_remaining) # compatibility
+
+                sig = inspect.signature(lr_schedule.__call__)
+
+                for name, param in sig.parameters.items():
+                    if param.kind in (inspect._ParameterKind.KEYWORD_ONLY, inspect._ParameterKind.POSITIONAL_OR_KEYWORD) and name == "_update_learning_rate":
+                        lr_schedule_kwargs["_update_learning_rate"] = True
+            else:
+                optimizer = data
+                lr_schedule = self.lr_schedule
+                lr_schedule_args = [self._current_progress_remaining]
+                lr_schedule_kwargs = {}
+
+            new_lr = lr_schedule(*lr_schedule_args, **lr_schedule_kwargs)
+
+            # Log the current learning rate
+            self.logger.record("train/learning_rate", new_lr)
+
+            update_learning_rate(optimizer, new_lr)
 
     def _excluded_save_params(self) -> List[str]:
         """

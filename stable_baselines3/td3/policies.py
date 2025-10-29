@@ -1,9 +1,10 @@
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union, Tuple
 
 import torch as th
 from gymnasium import spaces
 from torch import nn
 import numpy as np
+import gymnasium as gym
 
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.preprocessing import get_action_dim
@@ -16,6 +17,7 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
+from stable_baselines3.common.noise import ActionNoise
 
 
 class Actor(BasePolicy):
@@ -44,24 +46,32 @@ class Actor(BasePolicy):
         normalize_images: bool = True,
         actor_layer_norm_input: bool = False,
         actor_layer_norm_before_activation: bool = False,
+        actor_dropout: bool = False,
+        actor_dropout_p: float = 0.1,
+        squash_output: bool = True,
     ):
         super().__init__(
             observation_space,
             action_space,
             features_extractor=features_extractor,
             normalize_images=normalize_images,
-            squash_output=True,
+            squash_output=squash_output,
         )
 
         self.net_arch = net_arch
         self.features_dim = features_dim
         self.activation_fn = activation_fn
+        self.actor_layer_norm_input = actor_layer_norm_input
+        self.actor_layer_norm_before_activation = actor_layer_norm_before_activation
+        self.actor_dropout = actor_dropout
+        self.actor_dropout_p = actor_dropout_p
 
         #action_dim = get_action_dim(self.action_space)
         #actor_net = create_mlp(features_dim, action_dim, net_arch, activation_fn, squash_output=True)
         self.action_dim = get_action_dim(self.action_space)
-        actor_net = create_mlp(features_dim, self.action_dim, net_arch, activation_fn, squash_output=True,
-                               layer_norm_input=actor_layer_norm_input, layer_norm_before_activation=actor_layer_norm_before_activation)
+        actor_net = create_mlp(features_dim, self.action_dim, net_arch, activation_fn, squash_output=squash_output,
+                               layer_norm_input=actor_layer_norm_input, layer_norm_before_activation=actor_layer_norm_before_activation,
+                               use_dropout=actor_dropout, dropout_p=actor_dropout_p)
         # Deterministic action
         self.mu = nn.Sequential(*actor_net)
 
@@ -74,6 +84,10 @@ class Actor(BasePolicy):
                 features_dim=self.features_dim,
                 activation_fn=self.activation_fn,
                 features_extractor=self.features_extractor,
+                actor_layer_norm_input=self.actor_layer_norm_input,
+                actor_layer_norm_before_activation=self.actor_layer_norm_before_activation,
+                actor_dropout=self.actor_dropout,
+                actor_dropout_p=self.actor_dropout_p,
             )
         )
         return data
@@ -135,6 +149,9 @@ class TD3Policy(BasePolicy):
         actor_layer_norm_input: bool = False,
         actor_layer_norm_before_activation: bool = False,
         actor_last_layer_init_uniform_value: Optional[float] = None,
+        actor_dropout: bool = False,
+        actor_dropout_p: float = 0.1,
+        squash_output: bool = True,
     ):
         super().__init__(
             observation_space,
@@ -143,7 +160,7 @@ class TD3Policy(BasePolicy):
             features_extractor_kwargs,
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
-            squash_output=True,
+            squash_output=squash_output,
             normalize_images=normalize_images,
         )
 
@@ -155,6 +172,12 @@ class TD3Policy(BasePolicy):
                 net_arch = [400, 300]
 
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
+
+        self.actor_layer_norm_input = actor_layer_norm_input
+        self.actor_layer_norm_before_activation = actor_layer_norm_before_activation
+        self.actor_last_layer_init_uniform_value = actor_last_layer_init_uniform_value
+        self.actor_dropout = actor_dropout
+        self.actor_dropout_p = actor_dropout_p
 
         self.net_arch = net_arch
         self.activation_fn = activation_fn
@@ -175,13 +198,26 @@ class TD3Policy(BasePolicy):
             }
         )
 
+        gym.logger.info("n_critics: %d", n_critics)
+
         if actor_layer_norm_input:
             self.actor_kwargs["actor_layer_norm_input"] = actor_layer_norm_input
+
+            gym.logger.info("Adding layer norm input to actor")
+
         if actor_layer_norm_before_activation:
             self.actor_kwargs["actor_layer_norm_before_activation"] = actor_layer_norm_before_activation
 
+            gym.logger.info("Adding layer norm before activation to actor")
+
+        if actor_dropout:
+            self.actor_kwargs["actor_dropout"] = actor_dropout
+            self.actor_kwargs["actor_dropout_p"] = actor_dropout_p
+
+            gym.logger.info("Adding dropout to actor with p=%f", actor_dropout_p)
+
+        self.actor_kwargs["squash_output"] = squash_output # "def predict" clips the output when squash_output=False
         self.share_features_extractor = share_features_extractor
-        self.actor_last_layer_init_uniform_value = actor_last_layer_init_uniform_value
         _lr_schedule = lr_schedule if actor_lr_schedule is None else {"actor": actor_lr_schedule, "critic": lr_schedule}
 
         self._build(_lr_schedule)
@@ -193,7 +229,7 @@ class TD3Policy(BasePolicy):
         self.actor_target = self.make_actor(features_extractor=None)
 
         if self.actor_last_layer_init_uniform_value is not None:
-            nn.init.uniform_(self.actor.mu[-2].weight, -self.actor_last_layer_init_uniform_value, self.actor_last_layer_init_uniform_value) # -2 due to squash_output=True
+            nn.init.uniform_(self.actor.mu[-2 if self.squash_output else -1].weight, -self.actor_last_layer_init_uniform_value, self.actor_last_layer_init_uniform_value)
 
         # Initialize the target to have the same weights as the actor
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -201,12 +237,14 @@ class TD3Policy(BasePolicy):
         if isinstance(lr_schedule, dict):
             assert "actor" in lr_schedule and "critic" in lr_schedule, lr_schedule.keys()
 
-        actor_lr_schedule  = lr_schedule["actor"] if isinstance(lr_schedule, dict) else lr_schedule
-        critic_lr_schedule = lr_schedule["critic"] if isinstance(lr_schedule, dict) else lr_schedule
+        self.actor_lr_schedule  = lr_schedule["actor"] if isinstance(lr_schedule, dict) else lr_schedule
+        self.critic_lr_schedule = lr_schedule["critic"] if isinstance(lr_schedule, dict) else lr_schedule
+
+        gym.logger.info("Actor and critic learning rate: %f %f", self.actor_lr_schedule(1), self.critic_lr_schedule(1))
 
         self.actor.optimizer = self.optimizer_class(
             self.actor.parameters(),
-            lr=actor_lr_schedule(1),  # type: ignore[call-arg]
+            lr=self.actor_lr_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
 
@@ -226,7 +264,7 @@ class TD3Policy(BasePolicy):
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic.optimizer = self.optimizer_class(
             self.critic.parameters(),
-            lr=critic_lr_schedule(1),  # type: ignore[call-arg]
+            lr=self.critic_lr_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
 
@@ -248,6 +286,12 @@ class TD3Policy(BasePolicy):
                 features_extractor_class=self.features_extractor_class,
                 features_extractor_kwargs=self.features_extractor_kwargs,
                 share_features_extractor=self.share_features_extractor,
+                actor_lr_schedule=self._dummy_schedule,
+                actor_layer_norm_input=self.actor_layer_norm_input,
+                actor_layer_norm_before_activation=self.actor_layer_norm_before_activation,
+                actor_last_layer_init_uniform_value=self.actor_last_layer_init_uniform_value,
+                actor_dropout=self.actor_dropout,
+                actor_dropout_p=self.actor_dropout_p,
             )
         )
         return data
@@ -287,7 +331,7 @@ class WolpertingerPolicy(TD3Policy):
 
     #def __init__(self, *args, callback_retrieve_knn, embedding_size, k=0.1, **kwargs):
     def __init__(self, *args, callback_retrieve_knn=None, callback_retrieve_knn_training=None, k=0.1, add_all_knn_to_batch=False,
-                 apply_rws_inference=False, **kwargs):
+                 apply_rws_inference=False, exploration_rate=0.1, **kwargs):
         super().__init__(*args, **kwargs)
 
         assert callback_retrieve_knn is not None, "callback_retrieve_knn kwarg is mandatory"
@@ -302,6 +346,7 @@ class WolpertingerPolicy(TD3Policy):
         self.knn_percentage = isinstance(self.k, float)
         self.apply_rws_inference = apply_rws_inference
         self.n_critics = self.critic.n_critics
+        self.exploration_rate = exploration_rate
 
         if self.knn_percentage:
             min_k_percentage = 0.0001 # 0.01%
@@ -355,14 +400,75 @@ class WolpertingerPolicy(TD3Policy):
 
         return result
 
-    def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        return self._predict_conf(observation=observation, deterministic=deterministic, actor=self.actor, critic=self.critic, training=False)
+    def predict(
+        self,
+        observation: Union[np.ndarray, Dict[str, np.ndarray]],
+        state: Optional[Tuple[np.ndarray, ...]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        deterministic: bool = False,
+        action_noise: Optional[ActionNoise] = None,
+    ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
+        """
+        Code from BasePolicy with modifications for the Wolpertinger policy.
+        """
+        # Switch to eval mode (this affects batch norm / dropout)
+        self.set_training_mode(False)
+
+        # Check for common mistake that the user does not mix Gym/VecEnv API
+        # Tuple obs are not supported by SB3, so we can safely do that check
+        if isinstance(observation, tuple) and len(observation) == 2 and isinstance(observation[1], dict):
+            raise ValueError(
+                "You have passed a tuple to the predict() function instead of a Numpy array or a Dict. "
+                "You are probably mixing Gym API with SB3 VecEnv API: `obs, info = env.reset()` (Gym) "
+                "vs `obs = vec_env.reset()` (SB3 VecEnv). "
+                "See related issue https://github.com/DLR-RM/stable-baselines3/issues/1694 "
+                "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
+            )
+
+        obs_tensor, vectorized_env = self.obs_to_tensor(observation)
+
+        with th.no_grad():
+            actions = self._predict(obs_tensor, deterministic=deterministic, noise=action_noise)
+        # Convert to numpy, and reshape to the original action shape
+        actions = actions.cpu().numpy().reshape((-1, *self.action_space.shape))  # type: ignore[misc]
+
+        if isinstance(self.action_space, spaces.Box):
+            if self.squash_output:
+                # Rescale to proper domain when using squashing
+                actions = self.unscale_action(actions)  # type: ignore[assignment, arg-type]
+            else:
+                # Actions could be on arbitrary scale, so clip the actions to avoid
+                # out of bound error (e.g. if sampling from a Gaussian distribution)
+                actions = np.clip(actions, self.action_space.low, self.action_space.high)  # type: ignore[assignment, arg-type]
+
+        # Remove batch dimension if needed
+        if not vectorized_env:
+            assert isinstance(actions, np.ndarray)
+            actions = actions.squeeze(axis=0)
+
+        return actions, state  # type: ignore[return-value]
+
+    def _predict(self, observation: PyTorchObs, deterministic: bool = False, noise: th.Tensor = None) -> th.Tensor:
+        assert len(observation.shape) == 2, observation.shape
+
+        if not deterministic and np.random.rand() < self.exploration_rate: # code adapted from dqn for epislon-greedy exploration
+            n_batch = observation.shape[0]
+            action = th.tensor([self.action_space.sample() for _ in range(n_batch)])
+
+            gym.logger.debug("Epsilon-greedy exploration: random action sampled")
+        else:
+            if noise is not None and not isinstance(noise, th.Tensor):
+                noise = th.tensor(noise).to(self.device)
+
+            action = self._predict_conf(observation=observation, deterministic=deterministic, actor=self.actor, critic=lambda o, a: (self.critic.q1_forward(o, a),), training=False, actor_noise=noise, actor_clamp=True)
+
+        return action
 
     def _predict_conf(self, observation: PyTorchObs, deterministic: bool = False, actor: Actor = None, critic: ContinuousCritic = None, actor_noise: th.Tensor = None, actor_clamp: bool = False, training: bool = False) -> th.Tensor:
         if actor is None:
             actor = self.actor
         if critic is None:
-            critic = self.critic
+            critic = lambda o, a: (self.critic.q1_forward(o, a),)
 
         assert len(observation.shape) == 2, f"Observation shape was expected to contain 2 elements, but got {len(observation.shape)}"
         assert observation.shape[1] == self.actor_input_size, f"Observation shape[1] was expected to be {self.actor_input_size}, but got {observation.shape[1]}"
@@ -403,7 +509,7 @@ class WolpertingerPolicy(TD3Policy):
             _observation = th.tile(observation, (_k, 1)).to(self.device)
             critic_output = critic(_observation, _knn)
             critic_output = th.cat(critic_output, dim=1)
-            critic_output, _= th.min(critic_output, dim=1, keepdim=True)
+            #critic_output, _= th.min(critic_output, dim=1, keepdim=True)
 
             assert len(critic_output.shape) == 2
             assert critic_output.shape[0] == _k * batch_size, critic_output.shape
@@ -419,16 +525,18 @@ class WolpertingerPolicy(TD3Policy):
 
                 assert _knn.shape == (batch_size, self.actor_output_size), f"_knn shape was expected to be ({batch_size}, {self.actor_output_size}), but got {_knn.shape}"
 
-                critic_output = critic(observation, _knn) # Evaluate observations with each knn
+                critic_output = critic(observation, _knn) # Evaluate observations with each knn. The output is a tuple for the N critic networks
 
-                assert len(critic_output) == self.n_critics, f"Expected {self.n_critics} critics, but got {len(critic_output)}"
+                #assert len(critic_output) == self.n_critics, f"Expected {self.n_critics} critics, but got {len(critic_output)}"
+                assert len(critic_output) == 1, f"Expected 1, but got {len(critic_output)}"
 
                 critic_output = th.cat(critic_output, dim=1)
-                expected_shape = (batch_size, self.n_critics)
+                #expected_shape = (batch_size, self.n_critics)
+                expected_shape = (batch_size, 1) # the critic should always return a single value
 
                 assert critic_output.shape == expected_shape, f"Expected shape was {expected_shape}, but got {critic_output.shape}"
 
-                critic_output, _= th.min(critic_output, dim=1, keepdim=True)
+                #critic_output, _= th.min(critic_output, dim=1, keepdim=True) # Take min Q(s,a) from all critics (TD3)
 
                 assert len(critic_output.shape) == 2, f"critic shape was expected to contain 2 elements, but got {len(critic_output.shape)}"
                 assert critic_output.shape[0] == batch_size, f"critic shape[0] was expected to be {batch_size}, but got {critic_output.shape[0]}"

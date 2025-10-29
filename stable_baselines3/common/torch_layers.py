@@ -115,6 +115,8 @@ def create_mlp(
     with_bias: bool = True,
     layer_norm_input: bool = False,
     layer_norm_before_activation: bool = False,
+    use_dropout: bool = False,
+    dropout_p: float = 0.1,
 ) -> List[nn.Module]:
     """
     Create a multi layer perceptron (MLP), which is
@@ -145,6 +147,9 @@ def create_mlp(
 
         modules.append(activation_fn())
 
+        if use_dropout:
+            modules.append(nn.Dropout(p=dropout_p))
+
     for idx in range(len(net_arch) - 1):
         modules.append(nn.Linear(net_arch[idx], net_arch[idx + 1], bias=with_bias))
 
@@ -152,6 +157,9 @@ def create_mlp(
             modules.append(nn.LayerNorm(net_arch[idx + 1], bias=with_bias))
 
         modules.append(activation_fn())
+
+        if use_dropout:
+            modules.append(nn.Dropout(p=dropout_p))
 
     if output_dim > 0:
         last_layer_dim = net_arch[-1] if len(net_arch) > 0 else input_dim
